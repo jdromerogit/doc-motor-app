@@ -1,0 +1,145 @@
+import os, time, io, tempfile
+from datetime import datetime, timezone
+from typing import Optional, Dict, Any
+
+import boto3
+from botocore.exceptions import ClientError
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from docxtpl import DocxTemplate
+import uvicorn
+
+app = FastAPI(title="Docx Runner", version="1.0")
+
+def env(name: str, default: Optional[str] = None) -> str:
+    # Soporta BUCKET_* y S3_BUCKET_* para compatibilidad con repos previos
+    return os.getenv(name, os.getenv(f"S3_{name}", default or ""))
+
+AWS_REGION        = os.getenv("AWS_REGION", "us-east-1")
+BUCKET_PLANTILLAS = env("BUCKET_PLANTILLAS")
+BUCKET_RESULTADOS = env("BUCKET_RESULTADOS")
+DEFAULT_TEMPLATE_KEY = os.getenv("TEMPLATE_KEY", "")  # ej: tenants/pe/templates/pe_plantilla_solicitud_v2_test.docx
+
+s3 = boto3.client("s3", region_name=AWS_REGION)
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "ts": datetime.now(timezone.utc).isoformat()}
+
+@app.get("/s3-test")
+def s3_test(tenant_id: Optional[str] = "pe", template_id: Optional[str] = "pe_plantilla_solicitud_v2_test"):
+    if not BUCKET_PLANTILLAS or not BUCKET_RESULTADOS:
+        raise HTTPException(status_code=500, detail="Faltan BUCKET_PLANTILLAS o BUCKET_RESULTADOS")
+
+    plantilla_key = DEFAULT_TEMPLATE_KEY or f"tenants/{tenant_id}/templates/{template_id}.docx"
+
+    head_ok, version_id = False, None
+    try:
+        head_res = s3.head_object(Bucket=BUCKET_PLANTILLAS, Key=plantilla_key)
+        head_ok = True
+        version_id = head_res.get("VersionId")
+    except ClientError:
+        head_ok = False
+
+    epoch = int(time.time())
+    dummy_key = f"pruebas/{tenant_id}/{template_id}/dummy_{epoch}.txt"
+    body = f"dummy ok {datetime.now(timezone.utc).isoformat()}".encode("utf-8")
+    try:
+        s3.put_object(Bucket=BUCKET_RESULTADOS, Key=dummy_key, Body=body, ContentType="text/plain")
+        escritura_ok = True
+    except ClientError:
+        escritura_ok = False
+
+    presigned_url = None
+    try:
+        presigned_url = s3.generate_presigned_url(
+            ClientMethod="get_object",
+            Params={"Bucket": BUCKET_RESULTADOS, "Key": dummy_key},
+            ExpiresIn=3600,
+        )
+    except ClientError:
+        presigned_url = None
+
+    return {
+        "bucket_plantillas": BUCKET_PLANTILLAS,
+        "bucket_resultados": BUCKET_RESULTADOS,
+        "plantilla_key": plantilla_key,
+        "version_id": version_id,
+        "plantilla_head_ok": head_ok,
+        "escritura_ok": escritura_ok,
+        "presigned_url": presigned_url,
+    }
+
+class RenderRequest(BaseModel):
+    template_key: Optional[str] = None
+    context: Dict[str, Any] = {}
+    result_key: Optional[str] = None
+
+@app.post("/render")
+def render(req: RenderRequest):
+    if not BUCKET_PLANTILLAS or not BUCKET_RESULTADOS:
+        raise HTTPException(status_code=500, detail="Faltan BUCKET_PLANTILLAS o BUCKET_RESULTADOS")
+
+    template_key = req.template_key or DEFAULT_TEMPLATE_KEY
+    if not template_key:
+        raise HTTPException(status_code=400, detail="No se especificó template_key y TEMPLATE_KEY no está configurado")
+
+    try:
+        obj = s3.get_object(Bucket=BUCKET_PLANTILLAS, Key=template_key)
+        template_bytes = obj["Body"].read()
+    except ClientError as e:
+        raise HTTPException(status_code=404, detail=f"No se pudo leer la plantilla: {str(e)}")
+
+    with tempfile.TemporaryDirectory() as td:
+        tpl_path = os.path.join(td, "tpl.docx")
+        out_docx_path = os.path.join(td, "out.docx")
+
+        with open(tpl_path, "wb") as f:
+            f.write(template_bytes)
+
+        try:
+            doc = DocxTemplate(tpl_path)
+            doc.render(req.context or {})
+            doc.save(out_docx_path)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Error al renderizar DOCX: {str(e)}")
+
+        if req.result_key:
+            result_key = req.result_key
+        else:
+            base = template_key.rsplit("/", 1)[-1].replace(".docx", "")
+            ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            result_key = f"resultados/{base}/{base}_{ts}.docx"
+
+        with open(out_docx_path, "rb") as rf:
+            data = rf.read()
+        try:
+            s3.put_object(
+                Bucket=BUCKET_RESULTADOS,
+                Key=result_key,
+                Body=data,
+                ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        except ClientError as e:
+            raise HTTPException(status_code=500, detail=f"No se pudo subir el resultado: {str(e)}")
+
+    try:
+        url = s3.generate_presigned_url(
+            ClientMethod="get_object",
+            Params={"Bucket": BUCKET_RESULTADOS, "Key": result_key},
+            ExpiresIn=3600,
+        )
+    except ClientError:
+        url = None
+
+    return {
+        "bucket_plantillas": BUCKET_PLANTILLAS,
+        "bucket_resultados": BUCKET_RESULTADOS,
+        "template_key": template_key,
+        "result_key": result_key,
+        "download_url": url,
+    }
+
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", "8000"))
+    uvicorn.run("app:app", host="0.0.0.0", port=port, log_level="info", proxy_headers=True)
