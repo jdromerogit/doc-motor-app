@@ -1,13 +1,12 @@
 version: 1.0
-runtime: python311
+runtime: python3
 build:
   commands:
     build:
-      - pip3 install --upgrade pip
-      - pip3 install --no-cache-dir -r requirements.txt
+      - python -m pip install --upgrade pip
+      - python -m pip install --no-cache-dir -r requirements.txt
 run:
-  runtime-version: 3.11
-  command: python3 app.py
+  command: python app.py
   network:
     port: 8000
   env:
@@ -15,5 +14,4 @@ run:
       value: pe-plantillas-doc-motor
     - name: BUCKET_RESULTADOS
       value: pe-resultados-doc-motor
-    - name: AWS_REGION
-      value: us-east-1
+
