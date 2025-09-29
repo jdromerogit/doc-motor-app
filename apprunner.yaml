@@ -9,9 +9,3 @@ run:
   command: python app.py
   network:
     port: 8000
-  env:
-    - name: BUCKET_PLANTILLAS
-      value: pe-plantillas-doc-motor
-    - name: BUCKET_RESULTADOS
-      value: pe-resultados-doc-motor
-
