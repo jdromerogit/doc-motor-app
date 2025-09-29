@@ -118,14 +118,32 @@ class RenderRequest(BaseModel):
 def render(req: RenderRequest):
     """
     Renderiza una plantilla DOCX (en BUCKET_PLANTILLAS) con docxtpl y sube el resultado
-    (DOCX) a BUCKET_RESULTADOS. Si filename viene, se usa; si no, se genera con timestamp.
+    (DOCX) a BUCKET_RESULTADOS.
+
+    Cambios:
+    - Si viene req.filename, se usa.
+    - Si NO viene req.filename pero existe context["filename"], también se usa.
+    - Siempre se agrega el timestamp al final: <base>_<YYYYMMDDThhmmssZ>.docx
     """
     if not BUCKET_PLANTILLAS or not BUCKET_RESULTADOS:
         raise HTTPException(status_code=500, detail="Faltan BUCKET_PLANTILLAS o BUCKET_RESULTADOS")
 
     tpl_key = f"tenants/{req.tenant_id}/templates/{req.template_id}.docx"
+
+    # Base del nombre: prioridad 1) req.filename; 2) context["filename"]; 3) template_id
+    context_filename = None
+    try:
+        # Si context no es dict o no tiene 'filename', esto dejará None
+        if isinstance(req.context, dict):
+            context_filename = req.context.get("filename")
+    except Exception:
+        context_filename = None
+
+    base_name = req.filename or context_filename or req.template_id
+
+    # Sanitiza y SIEMPRE añade timestamp al final
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    fname = slugify_filename(req.filename or f"{req.template_id}_{ts}")
+    fname = f"{slugify_filename(base_name)}_{ts}"
     result_key = f"resultados/{req.tenant_id}/{fname}.docx"
 
     # 1) Descargar plantilla
@@ -169,6 +187,7 @@ def render(req: RenderRequest):
     return {
         "ok": True,
         "template_used": f"s3://{BUCKET_PLANTILLAS}/{tpl_key}",
+        "filename_base": fname,       # <- útil para logs/UI
         "result_key": result_key,
         "download_url": url,
     }
