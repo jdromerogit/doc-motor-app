@@ -6,7 +6,7 @@ build:
       - python -m pip install --upgrade pip
       - python -m pip install --no-cache-dir -r requirements.txt
 run:
-  command: python app.py
+  command: uvicorn app:app --host 0.0.0.0 --port 8000
   network:
     port: 8000
   env:
@@ -16,3 +16,4 @@ run:
       value: pe-resultados-doc-motor
     - name: AWS_REGION
       value: us-east-1
+
