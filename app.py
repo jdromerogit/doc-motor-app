@@ -6,7 +6,8 @@ import boto3
 from botocore.exceptions import ClientError
 from fastapi import FastAPI, HTTPException
 
-app = FastAPI()
+app = FastAPI(title="Docx Runner MVP1", version="1.0")
+
 
 AWS_REGION        = os.getenv("AWS_REGION", "us-east-1")
 BUCKET_PLANTILLAS = os.getenv("BUCKET_PLANTILLAS", os.getenv("S3_BUCKET_PLANTILLAS", ""))
